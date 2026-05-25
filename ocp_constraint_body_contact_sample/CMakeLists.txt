@@ -8,6 +8,7 @@ find_package(ament_cmake REQUIRED)
 
 set(dependencies
   ament_index_cpp
+  assimp_eigen
   mujoco_viewer
 )
 
