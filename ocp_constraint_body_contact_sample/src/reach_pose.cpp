@@ -6,6 +6,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <Eigen/Eigenvalues>
@@ -178,26 +179,51 @@ void appendAssumedSurfaceVisualization(mujoco_viewer::Viewer& viewer,
   }
 }
 
-void visualizeOptimizedResult(const std::string& modelPath,
-                              const ocs2::vector_t& state,
-                              const ocs2::vector_t& input,
-                              ocs2::PinocchioInterface& pinocchioInterface,
-                              const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
-                              const std::vector<AssumedSurfaceVisualization>& visualizations) {
-  mujoco_viewer::Viewer viewer;
-  viewer.viewModel(modelPath);
-
+void setViewerQ(mujoco_viewer::Viewer& viewer, const ocs2::vector_t& state) {
   const std::vector<double> viewerQ = toViewerQ(state);
   for (size_t i = 0; i < viewerQ.size() && i < static_cast<size_t>(viewer.model()->nq); ++i) {
     viewer.data()->qpos[i] = viewerQ[i];
   }
   mj_forward(viewer.model(), viewer.data());
+}
+
+void updatePinocchioKinematics(ocs2::PinocchioInterface& pinocchioInterface, const ocs2::vector_t& state) {
+  pinocchio::forwardKinematics(pinocchioInterface.getModel(), pinocchioInterface.getData(),
+                               state.head(pinocchioInterface.getModel().nq));
+  pinocchio::updateFramePlacements(pinocchioInterface.getModel(), pinocchioInterface.getData());
+}
+
+void visualizeOptimizationTrajectory(const std::string& modelPath,
+                                     const ocs2::vector_array_t& stateTrajectory,
+                                     const ocs2::vector_array_t& inputTrajectory,
+                                     ocs2::PinocchioInterface& pinocchioInterface,
+                                     const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
+                                     const std::vector<AssumedSurfaceVisualization>& visualizations) {
+  if (stateTrajectory.empty() || inputTrajectory.empty()) {
+    return;
+  }
+
+  mujoco_viewer::Viewer viewer;
+  viewer.viewModel(modelPath);
+
+  size_t trajectoryIndex = 0;
+  auto lastFrameTime = std::chrono::steady_clock::now();
+  constexpr auto frameDuration = std::chrono::milliseconds(120);
 
   while (viewer.isOpen()) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastFrameTime >= frameDuration) {
+      trajectoryIndex = (trajectoryIndex + 1) % std::min(stateTrajectory.size(), inputTrajectory.size());
+      lastFrameTime = now;
+    }
+
+    updatePinocchioKinematics(pinocchioInterface, stateTrajectory[trajectoryIndex]);
+    setViewerQ(viewer, stateTrajectory[trajectoryIndex]);
     viewer.updateScene();
-    appendAssumedSurfaceVisualization(viewer, pinocchioInterface, stateConverter, input, visualizations);
+    appendAssumedSurfaceVisualization(viewer, pinocchioInterface, stateConverter, inputTrajectory[trajectoryIndex], visualizations);
     viewer.drawScene();
     viewer.pollEvents();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 }
 
@@ -389,8 +415,8 @@ int main() {
     results["q"][i] = toViewerQ(result.stateTrajectory[i]);
   }
   trajectory_logger::write(packageShare + "/reach_pose.csv", results, times);
-  visualizeOptimizedResult(mujocoModelFile, result.state, result.input, pinocchioInterface,
-                           interface.getStateConverter(), assumedSurfaceVisualizations);
+  visualizeOptimizationTrajectory(mujocoModelFile, result.stateTrajectory, result.inputTrajectory, pinocchioInterface,
+                                  interface.getStateConverter(), assumedSurfaceVisualizations);
 
   return 0;
 }
