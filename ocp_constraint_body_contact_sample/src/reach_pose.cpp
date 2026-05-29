@@ -1,18 +1,22 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <chrono>
+#include <array>
+#include <cmath>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <vector>
 
+#include <Eigen/Eigenvalues>
+#include <mujoco/mujoco.h>
+#include <mujoco_viewer/mujoco_viewer.h>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/fwd.hpp>
 
 #include <ocs2_core/constraint/StateInputConstraint.h>
 #include <ocs2_core/soft_constraint/StateInputSoftConstraint.h>
-
 #include <ocp_constraint/contact_fix_constraint.h>
 #include <ocp_constraint/joint_limit_constraint.h>
 #include <ocp_constraint/joint_torque_cost.h>
@@ -27,6 +31,11 @@
 #include <trajectory_logger/trajectory_logger.h>
 
 namespace {
+
+struct AssumedSurfaceVisualization {
+  size_t contactIndex = 0;
+  const ocp_constraint_body_contact::AssumedSurfaceContactConstraint* constraint = nullptr;
+};
 
 ocs2::vector_t makeInitialState() {
   std::vector<double> initialState_v = {0.0, 0.0, 0.65, 0.0, 0.0, 0.0, 1.0,
@@ -56,6 +65,10 @@ std::vector<double> toViewerQ(const ocs2::vector_t& state) {
       offset += 3;
     }
   }
+  q[3] = state[6];
+  q[4] = state[3];
+  q[5] = state[4];
+  q[6] = state[5];
   return q;
 }
 
@@ -71,12 +84,130 @@ void addFootConstraint(ocp_solver::OCPInterface& interface, size_t contactIndex)
       std::make_unique<ocp_constraint::ContactFixConstraint>(*interface.getReferenceManagerPtr(), *frameDynamics, 6, config));
 }
 
+void appendSphere(mujoco_viewer::Viewer& viewer,
+                  const Eigen::Vector3d& position,
+                  double radius,
+                  const std::array<float, 4>& rgba) {
+  mjvGeom* geom = viewer.appendGeom();
+  if (!geom) return;
+
+  const mjtNum size[3] = {radius, radius, radius};
+  const mjtNum xpos[3] = {position.x(), position.y(), position.z()};
+  mjv_initGeom(geom, mjGEOM_SPHERE, size, xpos, nullptr, rgba.data());
+}
+
+void appendLine(mujoco_viewer::Viewer& viewer,
+                const Eigen::Vector3d& from,
+                const Eigen::Vector3d& to,
+                double width,
+                const std::array<float, 4>& rgba) {
+  mjvGeom* geom = viewer.appendGeom();
+  if (!geom) return;
+
+  const mjtNum fromArray[3] = {from.x(), from.y(), from.z()};
+  const mjtNum toArray[3] = {to.x(), to.y(), to.z()};
+  mjv_initGeom(geom, mjGEOM_LINE, nullptr, nullptr, nullptr, rgba.data());
+  mjv_connector(geom, mjGEOM_LINE, width, fromArray, toArray);
+}
+
+void appendAssumedSurfaceEllipse(mujoco_viewer::Viewer& viewer,
+                                 const pinocchio::SE3& contactPose,
+                                 const ocp_constraint_body_contact::AssumedSurfaceContactConstraint& constraint) {
+  const Eigen::Vector3d normal = constraint.getNormalInContactFrame().normalized();
+  const Eigen::Vector3d tangent0 = normal.unitOrthogonal();
+  const Eigen::Vector3d tangent1 = normal.cross(tangent0).normalized();
+  Eigen::Matrix<double, 3, 2> tangentBasis;
+  tangentBasis.col(0) = tangent0;
+  tangentBasis.col(1) = tangent1;
+
+  const Eigen::Matrix2d tangentMetric =
+      tangentBasis.transpose() * constraint.getEllipseMetricInContactFrame() * tangentBasis;
+  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(tangentMetric);
+  if (solver.info() != Eigen::Success) return;
+
+  const Eigen::Vector2d eigenvalues = solver.eigenvalues().cwiseMax(1e-12);
+  const Eigen::Matrix2d eigenvectors = solver.eigenvectors();
+  const Eigen::Vector3d centerLocal = constraint.getGeometricCenterInContactPlane();
+
+  constexpr int segments = 96;
+  const std::array<float, 4> ellipseColor = {0.1f, 0.9f, 0.25f, 1.0f};
+  Eigen::Vector3d previousWorld;
+  for (int i = 0; i <= segments; ++i) {
+    constexpr double twoPi = 6.28318530717958647692;
+    const double theta = twoPi * static_cast<double>(i) / static_cast<double>(segments);
+    Eigen::Vector2d ellipsePoint;
+    ellipsePoint << std::cos(theta) / std::sqrt(eigenvalues[0]),
+                    std::sin(theta) / std::sqrt(eigenvalues[1]);
+    const Eigen::Vector3d pointLocal = centerLocal + tangentBasis * (eigenvectors * ellipsePoint);
+    const Eigen::Vector3d pointWorld = contactPose.translation() + contactPose.rotation() * pointLocal;
+    if (i > 0) appendLine(viewer, previousWorld, pointWorld, 3.0, ellipseColor);
+    previousWorld = pointWorld;
+  }
+}
+
+void appendAssumedSurfaceVisualization(mujoco_viewer::Viewer& viewer,
+                                       ocs2::PinocchioInterface& pinocchioInterface,
+                                       const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
+                                       const ocs2::vector_t& input,
+                                       const std::vector<AssumedSurfaceVisualization>& visualizations) {
+  const std::array<float, 4> contactColor = {0.1f, 0.3f, 1.0f, 1.0f};
+  const std::array<float, 4> centerColor = {1.0f, 0.9f, 0.1f, 1.0f};
+  const std::array<float, 4> copColor = {1.0f, 0.05f, 0.05f, 1.0f};
+  const std::array<float, 4> normalColor = {0.95f, 0.95f, 0.95f, 1.0f};
+
+  for (const AssumedSurfaceVisualization& visualization : visualizations) {
+    if (!visualization.constraint) continue;
+    const pinocchio::SE3 contactPose =
+        ocp_solver::getContactCandidatePlacement(pinocchioInterface,
+                                                 stateConverter.getContactCandidate(visualization.contactIndex));
+    const Eigen::Matrix<ocs2::scalar_t, 6, 1> wrench =
+        stateConverter.getContactWrench(input, visualization.contactIndex);
+    const Eigen::Vector3d centerWorld =
+        contactPose.translation() + contactPose.rotation() * visualization.constraint->getGeometricCenterInContactPlane();
+    const Eigen::Vector3d copLocal =
+        visualization.constraint->computePressureCenterInContactFrame(contactPose.rotation(), wrench);
+    const Eigen::Vector3d copWorld = contactPose.translation() + contactPose.rotation() * copLocal;
+    const Eigen::Vector3d normalWorld =
+        contactPose.rotation() * visualization.constraint->getNormalInContactFrame().normalized();
+
+    appendAssumedSurfaceEllipse(viewer, contactPose, *visualization.constraint);
+    appendSphere(viewer, contactPose.translation(), 0.012, contactColor);
+    appendSphere(viewer, centerWorld, 0.01, centerColor);
+    appendSphere(viewer, copWorld, 0.014, copColor);
+    appendLine(viewer, contactPose.translation(), contactPose.translation() + 0.08 * normalWorld, 2.0, normalColor);
+  }
+}
+
+void visualizeOptimizedResult(const std::string& modelPath,
+                              const ocs2::vector_t& state,
+                              const ocs2::vector_t& input,
+                              ocs2::PinocchioInterface& pinocchioInterface,
+                              const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
+                              const std::vector<AssumedSurfaceVisualization>& visualizations) {
+  mujoco_viewer::Viewer viewer;
+  viewer.viewModel(modelPath);
+
+  const std::vector<double> viewerQ = toViewerQ(state);
+  for (size_t i = 0; i < viewerQ.size() && i < static_cast<size_t>(viewer.model()->nq); ++i) {
+    viewer.data()->qpos[i] = viewerQ[i];
+  }
+  mj_forward(viewer.model(), viewer.data());
+
+  while (viewer.isOpen()) {
+    viewer.updateScene();
+    appendAssumedSurfaceVisualization(viewer, pinocchioInterface, stateConverter, input, visualizations);
+    viewer.drawScene();
+    viewer.pollEvents();
+  }
+}
+
 }  // namespace
 
 int main() {
   const std::string packageShare = ament_index_cpp::get_package_share_directory("ocp_constraint_body_contact_sample");
   const std::string robotDir = packageShare + "/unitree_ros/robots/g1_description";
   const std::string urdfFile = robotDir + "/g1_29dof.urdf";
+  const std::string mujocoModelFile = robotDir + "/g1_29dof.xml";
 
   ocp_solver::OCPInterface interface;
   const std::vector<std::string> fixedJointNames = {"left_wrist_roll_joint",
@@ -133,6 +264,8 @@ int main() {
 
   addFootConstraint(interface, 0);
   addFootConstraint(interface, 1);
+  std::vector<AssumedSurfaceVisualization> assumedSurfaceVisualizations;
+  assumedSurfaceVisualizations.reserve(contactCandidates.size());
 
   {
     std::vector<double> Q_v = {0.0, 0.0, 100.0, 1.0, 1.0, 1.0,
@@ -173,15 +306,19 @@ int main() {
         std::unique_ptr<ocs2::StateCost>(
             new ocp_constraint::JointLimitsConstraint(interface.getPinocchioInterface(), interface.getStateConverter())));
 
-    ocs2::PieceWisePolynomialBarrierPenalty::Config surfaceContactConfig(1000, 0.01);
+    ocs2::PieceWisePolynomialBarrierPenalty::Config surfaceContactConfig(1e6, 1e-4);
+    ocp_constraint_body_contact::AssumedSurfaceContactConstraint::Config assumedSurfaceConfig;
+    assumedSurfaceConfig.ellipseSafetyMargin = 0.02;
     const std::vector<std::string> footMeshes = {robotDir + "/meshes/right_ankle_roll_link.STL",
                                                 robotDir + "/meshes/left_ankle_roll_link.STL"};
     for (size_t i = 0; i < contactCandidates.size(); ++i) {
+      auto constraint = std::make_unique<ocp_constraint_body_contact::AssumedSurfaceContactConstraint>(
+          *interface.getReferenceManagerPtr(), i, interface.getStateConverter(), footMeshes[i], assumedSurfaceConfig);
+      assumedSurfaceVisualizations.push_back({i, constraint.get()});
       interface.getOptimalControlProblem().softConstraintPtr->add(
           "assumedSurfaceContact_" + contactCandidates[i].frameName,
           std::make_unique<ocs2::StateInputSoftConstraint>(
-              std::make_unique<ocp_constraint_body_contact::AssumedSurfaceContactConstraint>(
-                  *interface.getReferenceManagerPtr(), i, interface.getStateConverter(), footMeshes[i]),
+              std::move(constraint),
               std::make_unique<ocs2::PieceWisePolynomialBarrierPenalty>(surfaceContactConfig)));
     }
 
@@ -229,6 +366,20 @@ int main() {
             << (ocp_solver::getContactCandidatePlacement(pinocchioInterface, interface.getStateConverter().getContactCandidate(0)).translation() - rfPose.translation()).transpose() << "\n";
   std::cout << "lf position error:\n"
             << (ocp_solver::getContactCandidatePlacement(pinocchioInterface, interface.getStateConverter().getContactCandidate(1)).translation() - lfPose.translation()).transpose() << "\n";
+  for (const AssumedSurfaceVisualization& visualization : assumedSurfaceVisualizations) {
+    const pinocchio::SE3 contactPose =
+        ocp_solver::getContactCandidatePlacement(pinocchioInterface,
+                                                 interface.getStateConverter().getContactCandidate(visualization.contactIndex));
+    const Eigen::Vector3d copLocal =
+        visualization.constraint->computePressureCenterInContactFrame(
+            contactPose.rotation(), interface.getStateConverter().getContactWrench(result.input, visualization.contactIndex));
+    const Eigen::Vector3d copError =
+        copLocal - visualization.constraint->getGeometricCenterInContactPlane();
+    const double ellipseMargin =
+        1.0 - copError.dot(visualization.constraint->getEllipseMetricInContactFrame() * copError);
+    std::cout << interface.getStateConverter().getContactCandidate(visualization.contactIndex).frameName
+              << " assumed surface margin: " << ellipseMargin << "\n";
+  }
 
   std::map<std::string, std::vector<std::vector<double>>> results;
   std::vector<double> times(result.stateTrajectory.size());
@@ -238,6 +389,8 @@ int main() {
     results["q"][i] = toViewerQ(result.stateTrajectory[i]);
   }
   trajectory_logger::write(packageShare + "/reach_pose.csv", results, times);
+  visualizeOptimizedResult(mujocoModelFile, result.state, result.input, pinocchioInterface,
+                           interface.getStateConverter(), assumedSurfaceVisualizations);
 
   return 0;
 }
