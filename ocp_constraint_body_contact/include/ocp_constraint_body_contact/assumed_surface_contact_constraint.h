@@ -4,20 +4,24 @@
 #include <ocp_solver/solver/state_converter.h>
 #include <ocp_solver/solver/switched_model_reference_manager.h>
 
+#include <string>
+#include <vector>
+
 namespace ocp_constraint_body_contact {
 
   class AssumedSurfaceContactConstraint final : public ocs2::StateInputConstraint {
   public:
     struct Config {
       Config(){};
-      ocs2::scalar_t frictionCoef = 0.2;
-      ocs2::scalar_t x = 0.05;
-      ocs2::scalar_t y = 0.05;
-      ocs2::scalar_t rotFrictionCoef = 0.005;
+      Eigen::Vector3d surfaceNormalInContactFrame = Eigen::Vector3d::UnitZ();
+      ocs2::scalar_t normalWeightScale = 50.0;
+      ocs2::scalar_t covarianceRegularization = 1e-6;
+      ocs2::scalar_t normalForceRegularization = 1e-6;
     };
     AssumedSurfaceContactConstraint(const ocp_solver::SwitchedModelReferenceManager& referenceManager,
                                     size_t contactIndex,
                                     const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
+                                    const std::string& meshFile,
                                     Config config=Config());
 
     ~AssumedSurfaceContactConstraint() override = default;
@@ -36,11 +40,19 @@ namespace ocp_constraint_body_contact {
 
   private:
     AssumedSurfaceContactConstraint(const AssumedSurfaceContactConstraint& rhs);
+    void computeWeightedGeometry();
+
     const ocp_solver::StateConverter<ocs2::scalar_t>* stateConverterPtr_;
     const ocp_solver::SwitchedModelReferenceManager* referenceManagerPtr_;
     const size_t contactIndex_;
-    static const int n_constraints = 11;
-    ocs2::matrix_t coef_;
+    static const int n_constraints = 1;
+    Config config_;
+    std::vector<Eigen::Vector3d> vertices_;
+    Eigen::Vector3d normalInContactFrame_ = Eigen::Vector3d::UnitZ();
+    Eigen::Vector3d geometricCenter_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d geometricCenterInContactPlane_ = Eigen::Vector3d::Zero();
+    Eigen::Matrix3d covariance_ = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d ellipseMetric_ = Eigen::Matrix3d::Identity();
   };
 
 }

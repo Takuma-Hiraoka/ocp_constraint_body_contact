@@ -11,6 +11,10 @@
   <depend>ament_index_cpp</depend>
   <depend>assimp_eigen</depend>
   <depend>mujoco_viewer</depend>
+  <depend>ocp_constraint</depend>
+  <depend>ocp_constraint_body_contact</depend>
+  <depend>ocp_solver</depend>
+  <depend>trajectory_logger</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

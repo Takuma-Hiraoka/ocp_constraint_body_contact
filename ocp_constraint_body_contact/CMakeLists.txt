@@ -8,6 +8,7 @@ find_package(ament_cmake REQUIRED)
 
 set(dependencies
   ocp_solver
+  assimp_eigen
 )
 
 foreach(dep ${dependencies})

@@ -10,6 +10,10 @@ set(dependencies
   ament_index_cpp
   assimp_eigen
   mujoco_viewer
+  ocp_constraint
+  ocp_constraint_body_contact
+  ocp_solver
+  trajectory_logger
 )
 
 foreach(dep ${dependencies})
@@ -24,6 +28,17 @@ ament_target_dependencies(visualize
 
 install(TARGETS
   visualize
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(reach_pose src/reach_pose.cpp)
+
+ament_target_dependencies(reach_pose
+  ${dependencies}
+  )
+
+install(TARGETS
+  reach_pose
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,41 +1,98 @@
 #include "ocp_constraint_body_contact/assumed_surface_contact_constraint.h"
-#include <ocp_solver/solver/ocp_pre_computation.h>
+
+#include <assimp_eigen/assimp_eigen.h>
 #include <ocp_solver/solver/dynamics_helper_functions.h>
+#include <ocp_solver/solver/ocp_pre_computation.h>
 #include <ocs2_robotic_tools/common/SkewSymmetricMatrix.h>
-#include <pinocchio/algorithm/frames.hpp>
-#include <pinocchio/algorithm/jacobian.hpp>
-#include <pinocchio/multibody/data.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace ocp_constraint_body_contact {
+namespace {
+
+  Eigen::Matrix3d tangentProjection(const Eigen::Vector3d& normal) {
+    return Eigen::Matrix3d::Identity() - normal * normal.transpose();
+  }
+
+}  // namespace
 
   AssumedSurfaceContactConstraint::AssumedSurfaceContactConstraint(const ocp_solver::SwitchedModelReferenceManager& referenceManager,
                                                                    size_t contactIndex,
                                                                    const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
+                                                                   const std::string& meshFile,
                                                                    Config config)
     : StateInputConstraint(ocs2::ConstraintOrder::Linear),
+      stateConverterPtr_(&stateConverter),
       referenceManagerPtr_(&referenceManager),
       contactIndex_(contactIndex),
-      stateConverterPtr_(&stateConverter) {
-    coef_ = ocs2::matrix_t::Zero(n_constraints, 6);
-    coef_( 0,2) =  1.0;
-    coef_( 1,0) =  1.0; coef_( 1,2) = config.frictionCoef;
-    coef_( 2,0) = -1.0; coef_( 2,2) = config.frictionCoef;
-    coef_( 3,1) =  1.0; coef_( 3,2) = config.frictionCoef;
-    coef_( 4,1) = -1.0; coef_( 4,2) = config.frictionCoef;
-    coef_( 5,3) =  1.0; coef_( 5,2) = config.x;
-    coef_( 6,3) = -1.0; coef_( 6,2) = config.x;
-    coef_( 7,4) =  1.0; coef_( 7,2) = config.y;
-    coef_( 8,4) = -1.0; coef_( 8,2) = config.y;
-    coef_( 9,5) =  1.0; coef_( 9,2) = config.rotFrictionCoef;
-    coef_(10,5) = -1.0; coef_(10,2) = config.rotFrictionCoef;
+      config_(std::move(config)) {
+    const assimp_eigen::MeshData mesh = assimp_eigen::loadMesh(meshFile);
+    vertices_ = mesh.vertices;
+    if (vertices_.empty()) {
+      throw std::runtime_error("AssumedSurfaceContactConstraint: mesh has no vertices: " + meshFile);
+    }
+    computeWeightedGeometry();
   }
 
   AssumedSurfaceContactConstraint::AssumedSurfaceContactConstraint(const AssumedSurfaceContactConstraint& rhs)
     : StateInputConstraint(rhs),
+      stateConverterPtr_(rhs.stateConverterPtr_->clone()),
       referenceManagerPtr_(rhs.referenceManagerPtr_),
       contactIndex_(rhs.contactIndex_),
-      stateConverterPtr_(rhs.stateConverterPtr_->clone()),
-      coef_(rhs.coef_) {}
+      config_(rhs.config_),
+      vertices_(rhs.vertices_),
+      normalInContactFrame_(rhs.normalInContactFrame_),
+      geometricCenter_(rhs.geometricCenter_),
+      geometricCenterInContactPlane_(rhs.geometricCenterInContactPlane_),
+      covariance_(rhs.covariance_),
+      ellipseMetric_(rhs.ellipseMetric_) {}
+
+  void AssumedSurfaceContactConstraint::computeWeightedGeometry() {
+    normalInContactFrame_ = config_.surfaceNormalInContactFrame;
+    if (!normalInContactFrame_.allFinite() || normalInContactFrame_.squaredNorm() < 1e-12) {
+      throw std::runtime_error("AssumedSurfaceContactConstraint: surfaceNormalInContactFrame must be non-zero.");
+    }
+    normalInContactFrame_.normalize();
+
+    ocs2::scalar_t maxSignedDistance = -std::numeric_limits<ocs2::scalar_t>::infinity();
+    for (const Eigen::Vector3d& vertex : vertices_) {
+      maxSignedDistance = std::max(maxSignedDistance, normalInContactFrame_.dot(vertex));
+    }
+
+    ocs2::scalar_t weightSum = 0.0;
+    geometricCenter_.setZero();
+    for (const Eigen::Vector3d& vertex : vertices_) {
+      const ocs2::scalar_t signedDistance = normalInContactFrame_.dot(vertex);
+      const ocs2::scalar_t weight = std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance));
+      weightSum += weight;
+      geometricCenter_.noalias() += weight * vertex;
+    }
+    if (weightSum <= 0.0) {
+      throw std::runtime_error("AssumedSurfaceContactConstraint: weighted mesh geometry is degenerate.");
+    }
+    geometricCenter_ /= weightSum;
+
+    covariance_.setZero();
+    for (const Eigen::Vector3d& vertex : vertices_) {
+      const ocs2::scalar_t signedDistance = normalInContactFrame_.dot(vertex);
+      const ocs2::scalar_t weight = std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance));
+      const Eigen::Vector3d delta = vertex - geometricCenter_;
+      covariance_.noalias() += weight * delta * delta.transpose();
+    }
+    covariance_ /= weightSum;
+
+    const Eigen::Matrix3d projection = tangentProjection(normalInContactFrame_);
+    geometricCenterInContactPlane_ = projection * geometricCenter_;
+    const Eigen::Matrix3d tangentCovariance =
+      projection * covariance_ * projection
+      + config_.covarianceRegularization * projection
+      + normalInContactFrame_ * normalInContactFrame_.transpose();
+    ellipseMetric_ = tangentCovariance.inverse();
+  }
 
   bool AssumedSurfaceContactConstraint::isActive(ocs2::scalar_t time) const {
     return referenceManagerPtr_->isInContact(time, stateConverterPtr_->getContactCandidateIds()[contactIndex_]);
@@ -47,12 +104,27 @@ namespace ocp_constraint_body_contact {
                                                            const ocs2::PreComputation& preComp) const {
     const ocp_solver::OCPPreComputation& ocpPreComp = static_cast<const ocp_solver::OCPPreComputation&>(preComp);
     ocs2::PinocchioInterface& pinocchioInterface = ocpPreComp.getPinocchioInterface();
-    Eigen::Matrix3d R_frame =
+    const Eigen::Matrix3d R_frame =
       ocp_solver::getContactCandidatePlacement(pinocchioInterface, stateConverterPtr_->getContactCandidate(contactIndex_)).rotation();
-    Eigen::Matrix<ocs2::scalar_t, 6, 6> R = Eigen::Matrix<ocs2::scalar_t, 6, 6>::Zero();
-    R.block(0,0,3,3) = R_frame.transpose();
-    R.block(3,3,3,3) = R_frame.transpose();
-    ocs2::vector_t constraint = coef_ * R * stateConverterPtr_->getContactWrench(input, contactIndex_);
+
+    // getContactWrench() is expressed in LOCAL_WORLD_ALIGNED axes. Convert it to the contact-local axes here.
+    Eigen::Matrix<ocs2::scalar_t, 6, 6> worldToContact = Eigen::Matrix<ocs2::scalar_t, 6, 6>::Zero();
+    worldToContact.block<3, 3>(0, 0) = R_frame.transpose();
+    worldToContact.block<3, 3>(3, 3) = R_frame.transpose();
+    const Eigen::Matrix<ocs2::scalar_t, 6, 1> localWrench =
+      worldToContact * stateConverterPtr_->getContactWrench(input, contactIndex_);
+    const Eigen::Vector3d localForce = localWrench.head<3>();
+    const Eigen::Vector3d localMoment = localWrench.tail<3>();
+
+    const ocs2::scalar_t normalForce =
+      normalInContactFrame_.dot(localForce) + config_.normalForceRegularization;
+    const Eigen::Vector3d pressureCenter =
+      normalInContactFrame_.cross(localMoment) / normalForce;
+    const Eigen::Vector3d pressureCenterError =
+      pressureCenter - geometricCenterInContactPlane_;
+
+    ocs2::vector_t constraint(n_constraints);
+    constraint[0] = 1.0 - pressureCenterError.dot(ellipseMetric_ * pressureCenterError);
     return constraint;
   }
 
@@ -62,31 +134,61 @@ namespace ocp_constraint_body_contact {
                                                                                                   const ocs2::PreComputation& preComp) const {
     const ocp_solver::OCPPreComputation& ocpPreComp = static_cast<const ocp_solver::OCPPreComputation&>(preComp);
     ocs2::PinocchioInterface& pinocchioInterface = ocpPreComp.getPinocchioInterface();
-    Eigen::Matrix3d R_frame =
+    const Eigen::Matrix3d R_frame =
       ocp_solver::getContactCandidatePlacement(pinocchioInterface, stateConverterPtr_->getContactCandidate(contactIndex_)).rotation();
-    Eigen::Matrix<ocs2::scalar_t, 6, 6> R = Eigen::Matrix<ocs2::scalar_t, 6, 6>::Zero();
-    R.block(0,0,3,3) = R_frame.transpose();
-    R.block(3,3,3,3) = R_frame.transpose();
-    const Eigen::Matrix<ocs2::scalar_t, 6, 1> wrench = stateConverterPtr_->getContactWrench(input, contactIndex_);
+
+    // getContactWrench() is expressed in LOCAL_WORLD_ALIGNED axes. Convert it to the contact-local axes here.
+    Eigen::Matrix<ocs2::scalar_t, 6, 6> worldToContact = Eigen::Matrix<ocs2::scalar_t, 6, 6>::Zero();
+    worldToContact.block<3, 3>(0, 0) = R_frame.transpose();
+    worldToContact.block<3, 3>(3, 3) = R_frame.transpose();
+    const Eigen::Matrix<ocs2::scalar_t, 6, 1> worldWrench =
+      stateConverterPtr_->getContactWrench(input, contactIndex_);
+    const Eigen::Matrix<ocs2::scalar_t, 6, 1> localWrench = worldToContact * worldWrench;
+    const Eigen::Vector3d localForce = localWrench.head<3>();
+    const Eigen::Vector3d localMoment = localWrench.tail<3>();
+
+    const ocs2::scalar_t normalForce =
+      normalInContactFrame_.dot(localForce) + config_.normalForceRegularization;
+    const Eigen::Vector3d pressureCenter =
+      normalInContactFrame_.cross(localMoment) / normalForce;
+    const Eigen::Vector3d pressureCenterError =
+      pressureCenter - geometricCenterInContactPlane_;
 
     ocs2::VectorFunctionLinearApproximation approx;
-    approx.f = coef_ * R * wrench;
+    approx.f = ocs2::vector_t::Zero(n_constraints);
+    approx.f[0] = 1.0 - pressureCenterError.dot(ellipseMetric_ * pressureCenterError);
     approx.dfdx = ocs2::matrix_t::Zero(n_constraints, stateConverterPtr_->getStateVariableDim());
     approx.dfdu = ocs2::matrix_t::Zero(n_constraints, stateConverterPtr_->getInputDim());
-    approx.dfdu.middleCols<6>(6 * contactIndex_) = coef_ * R;
 
-    ocs2::matrix_t frameJacobian = ocs2::matrix_t::Zero(6, stateConverterPtr_->getTangentDim());
-    ocp_solver::getContactCandidateJacobian(pinocchioInterface, stateConverterPtr_->getContactCandidate(contactIndex_),
-                                            pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED, frameJacobian);
+    const Eigen::RowVector3d dConstraintDPressureCenter =
+      -2.0 * pressureCenterError.transpose() * ellipseMetric_;
+    Eigen::Matrix<ocs2::scalar_t, 3, 6> dPressureCenterDLocalWrench =
+      Eigen::Matrix<ocs2::scalar_t, 3, 6>::Zero();
+    dPressureCenterDLocalWrench.leftCols<3>().noalias() =
+      -(pressureCenter / normalForce) * normalInContactFrame_.transpose();
+    dPressureCenterDLocalWrench.rightCols<3>().noalias() =
+      ocs2::skewSymmetricMatrix(normalInContactFrame_) / normalForce;
+    const Eigen::Matrix<ocs2::scalar_t, 1, 6> dConstraintDLocalWrench =
+      dConstraintDPressureCenter * dPressureCenterDLocalWrench;
 
-    Eigen::Matrix<ocs2::scalar_t, 6, 6> localWrenchDerivativeWrtFrameRotation =
+    approx.dfdu.middleCols<6>(stateConverterPtr_->getContactWrenchStartIndices(contactIndex_)).noalias() =
+      dConstraintDLocalWrench * worldToContact;
+
+    ocs2::matrix_t contactJacobian = ocs2::matrix_t::Zero(6, stateConverterPtr_->getTangentDim());
+    ocp_solver::getContactCandidateJacobian(pinocchioInterface,
+                                            stateConverterPtr_->getContactCandidate(contactIndex_),
+                                            pinocchio::ReferenceFrame::LOCAL_WORLD_ALIGNED,
+                                            contactJacobian);
+
+    Eigen::Matrix<ocs2::scalar_t, 6, 6> dLocalWrenchDFrameRotation =
       Eigen::Matrix<ocs2::scalar_t, 6, 6>::Zero();
-    localWrenchDerivativeWrtFrameRotation.block<3, 3>(0, 3) =
-      R_frame.transpose() * ocs2::skewSymmetricMatrix(Eigen::Vector3d(wrench.head<3>()));
-    localWrenchDerivativeWrtFrameRotation.block<3, 3>(3, 3) =
-      R_frame.transpose() * ocs2::skewSymmetricMatrix(Eigen::Vector3d(wrench.tail<3>()));
+    dLocalWrenchDFrameRotation.block<3, 3>(0, 3) =
+      R_frame.transpose() * ocs2::skewSymmetricMatrix(Eigen::Vector3d(worldWrench.head<3>()));
+    dLocalWrenchDFrameRotation.block<3, 3>(3, 3) =
+      R_frame.transpose() * ocs2::skewSymmetricMatrix(Eigen::Vector3d(worldWrench.tail<3>()));
     approx.dfdx.leftCols(stateConverterPtr_->getTangentDim()).noalias() =
-      coef_ * localWrenchDerivativeWrtFrameRotation * frameJacobian;
+      dConstraintDLocalWrench * dLocalWrenchDFrameRotation * contactJacobian;
+
     return approx;
   }
 
