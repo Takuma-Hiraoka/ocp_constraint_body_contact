@@ -14,6 +14,7 @@
   <depend>ocp_constraint</depend>
   <depend>ocp_constraint_body_contact</depend>
   <depend>ocp_solver</depend>
+  <depend>point_mesh_projector</depend>
   <depend>trajectory_logger</depend>
 
   <export>

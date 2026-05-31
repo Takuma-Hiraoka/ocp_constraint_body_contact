@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 set(dependencies
   ocp_solver
   assimp_eigen
+  ocs2_robotic_tools
 )
 
 foreach(dep ${dependencies})
@@ -17,6 +18,9 @@ endforeach()
 
 add_library(${PROJECT_NAME}
   src/assumed_surface_contact_constraint.cpp
+  src/contact_point_search_constraint.cpp
+  src/cop_center_constraint.cpp
+  src/cop_moment_constraint.cpp
   )
 
 target_include_directories(${PROJECT_NAME}

@@ -13,6 +13,7 @@ set(dependencies
   ocp_constraint
   ocp_constraint_body_contact
   ocp_solver
+  point_mesh_projector
   trajectory_logger
 )
 
@@ -39,6 +40,17 @@ ament_target_dependencies(reach_pose
 
 install(TARGETS
   reach_pose
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(wall_hand_mpc src/wall_hand_mpc.cpp)
+
+ament_target_dependencies(wall_hand_mpc
+  ${dependencies}
+  )
+
+install(TARGETS
+  wall_hand_mpc
   DESTINATION lib/${PROJECT_NAME}
 )
 
