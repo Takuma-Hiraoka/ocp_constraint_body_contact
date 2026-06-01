@@ -365,6 +365,7 @@ int main(int argc, char** argv) {
     candidate.localPose = pinocchio::SE3(Eigen::Matrix3d::Identity(), Eigen::Vector3d(0.035, -0.01, 0.0));
     candidate.searchContactPoint = true;
     candidate.alignContactFrameWithMeshNormal = true;
+    candidate.meshNormalSubmeshRadius = 0.12;
     const assimp_eigen::MeshData mesh = assimp_eigen::loadMesh(rhContactMeshFile);
     candidate.meshVerticesInLocalFrame = mesh.vertices;
     candidate.meshNormalsInLocalFrame = mesh.normals;
