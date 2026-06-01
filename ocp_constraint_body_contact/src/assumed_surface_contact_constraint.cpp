@@ -5,6 +5,7 @@
 #include <ocp_solver/solver/ocp_pre_computation.h>
 #include <ocs2_robotic_tools/common/SkewSymmetricMatrix.h>
 
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -21,6 +22,46 @@ namespace {
   Eigen::Vector3d normalAlignedWithForce(const Eigen::Vector3d& normal,
                                          const Eigen::Vector3d& localForce) {
     return normal.dot(localForce) < 0.0 ? -normal : normal;
+  }
+
+  Eigen::Matrix3d inversePositiveDefiniteMetric(const Eigen::Matrix3d& matrix,
+                                                ocs2::scalar_t scale) {
+    const Eigen::Matrix3d symmetricMatrix = 0.5 * (matrix + matrix.transpose());
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(symmetricMatrix);
+    if (solver.info() != Eigen::Success) {
+      return Eigen::Matrix3d::Identity() / (scale * scale);
+    }
+    const Eigen::Vector3d inverseEigenvalues =
+      solver.eigenvalues().cwiseMax(1e-9).cwiseInverse() / (scale * scale);
+    return solver.eigenvectors() * inverseEigenvalues.asDiagonal() * solver.eigenvectors().transpose();
+  }
+
+  Eigen::Matrix3d makeContactRotationFromNormal(const Eigen::Matrix3d& referenceRotation,
+                                                Eigen::Vector3d normal) {
+    if (!normal.allFinite() || normal.squaredNorm() < 1e-12) {
+      return referenceRotation;
+    }
+    normal.normalize();
+    if (normal.dot(referenceRotation.col(2)) < 0.0) {
+      normal = -normal;
+    }
+
+    Eigen::Vector3d xAxis = referenceRotation.col(0) - normal * normal.dot(referenceRotation.col(0));
+    if (!xAxis.allFinite() || xAxis.squaredNorm() < 1e-12) {
+      xAxis = referenceRotation.col(1) - normal * normal.dot(referenceRotation.col(1));
+    }
+    if (!xAxis.allFinite() || xAxis.squaredNorm() < 1e-12) {
+      xAxis = normal.unitOrthogonal();
+    }
+    xAxis.normalize();
+    Eigen::Vector3d yAxis = normal.cross(xAxis).normalized();
+    xAxis = yAxis.cross(normal).normalized();
+
+    Eigen::Matrix3d rotation;
+    rotation.col(0) = xAxis;
+    rotation.col(1) = yAxis;
+    rotation.col(2) = normal;
+    return rotation;
   }
 
 }  // namespace
@@ -135,11 +176,18 @@ namespace {
       projection * covariance_ * projection
       + config_.covarianceRegularization * projection
       + normalInContactFrame_ * normalInContactFrame_.transpose();
-    ellipseMetric_ = tangentCovariance.inverse() / (config_.ellipseScale * config_.ellipseScale);
+    ellipseMetric_ = inversePositiveDefiniteMetric(tangentCovariance, config_.ellipseScale);
   }
 
   AssumedSurfaceContactConstraint::SurfaceGeometry AssumedSurfaceContactConstraint::computeWeightedGeometry(
       const Eigen::Vector3d& normalInContactFrame,
+      const pinocchio::SE3& contactPoseInLocalFrame) const {
+    return computeWeightedGeometry(normalInContactFrame, surfaceNormalInContactFrame_, contactPoseInLocalFrame);
+  }
+
+  AssumedSurfaceContactConstraint::SurfaceGeometry AssumedSurfaceContactConstraint::computeWeightedGeometry(
+      const Eigen::Vector3d& normalInContactFrame,
+      const Eigen::Vector3d& surfaceWeightNormalInContactFrame,
       const pinocchio::SE3& contactPoseInLocalFrame) const {
     SurfaceGeometry geometry;
     geometry.normalInContactFrame = normalInContactFrame;
@@ -147,12 +195,18 @@ namespace {
       geometry.normalInContactFrame = normalInContactFrame_;
     }
     geometry.normalInContactFrame.normalize();
+    Eigen::Vector3d surfaceGeometryWeightNormalInContactFrame = surfaceWeightNormalInContactFrame;
+    if (!surfaceGeometryWeightNormalInContactFrame.allFinite()
+        || surfaceGeometryWeightNormalInContactFrame.squaredNorm() < 1e-12) {
+      surfaceGeometryWeightNormalInContactFrame = surfaceNormalInContactFrame_;
+    }
+    surfaceGeometryWeightNormalInContactFrame.normalize();
 
     ocs2::scalar_t maxSignedDistance = -std::numeric_limits<ocs2::scalar_t>::infinity();
     const pinocchio::SE3 localFramePoseInContact = contactPoseInLocalFrame.inverse();
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
-      maxSignedDistance = std::max(maxSignedDistance, geometry.normalInContactFrame.dot(vertexInContactFrame));
+      maxSignedDistance = std::max(maxSignedDistance, surfaceGeometryWeightNormalInContactFrame.dot(vertexInContactFrame));
     }
 
     ocs2::scalar_t weightSum = 0.0;
@@ -161,7 +215,7 @@ namespace {
     const double invTwoProximitySigma2 = 0.5 / (proximityLengthScale * proximityLengthScale);
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
-      const ocs2::scalar_t signedDistance = geometry.normalInContactFrame.dot(vertexInContactFrame);
+      const ocs2::scalar_t signedDistance = surfaceGeometryWeightNormalInContactFrame.dot(vertexInContactFrame);
       const ocs2::scalar_t weight =
         std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance))
         * std::exp(-vertexInContactFrame.squaredNorm() * invTwoProximitySigma2);
@@ -176,7 +230,7 @@ namespace {
     Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
-      const ocs2::scalar_t signedDistance = geometry.normalInContactFrame.dot(vertexInContactFrame);
+      const ocs2::scalar_t signedDistance = surfaceGeometryWeightNormalInContactFrame.dot(vertexInContactFrame);
       const ocs2::scalar_t weight =
         std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance))
         * std::exp(-vertexInContactFrame.squaredNorm() * invTwoProximitySigma2);
@@ -191,7 +245,7 @@ namespace {
       projection * covariance * projection
       + config_.covarianceRegularization * projection
       + geometry.normalInContactFrame * geometry.normalInContactFrame.transpose();
-    geometry.ellipseMetric = tangentCovariance.inverse() / (config_.ellipseScale * config_.ellipseScale);
+    geometry.ellipseMetric = inversePositiveDefiniteMetric(tangentCovariance, config_.ellipseScale);
     return geometry;
   }
 
@@ -208,13 +262,12 @@ namespace {
     return pinocchio::SE3::Identity();
   }
 
-  Eigen::Vector3d AssumedSurfaceContactConstraint::computeMeshNormalInContactFrame(
-      const pinocchio::SE3& contactPoseInLocalFrame) const {
+  Eigen::Vector3d AssumedSurfaceContactConstraint::computeMeshNormalInLocalFrame(
+      const Eigen::Vector3d& contactPointInLocalFrame) const {
     if (vertices_.empty() || normals_.empty()) {
-      return normalInContactFrame_;
+      return defaultContactPoseInLocalFrame_.rotation() * normalInContactFrame_;
     }
 
-    const Eigen::Vector3d contactPointInLocalFrame = contactPoseInLocalFrame.translation();
     Eigen::Vector3d weightedNormalInLocalFrame = Eigen::Vector3d::Zero();
     double weightSum = 0.0;
     const double lengthScale = 0.02;
@@ -233,6 +286,19 @@ namespace {
     if (weightSum > 0.0) {
       normalInLocalFrame = weightedNormalInLocalFrame / weightSum;
     }
+    if (!normalInLocalFrame.allFinite() || normalInLocalFrame.squaredNorm() < 1e-12) {
+      normalInLocalFrame = defaultContactPoseInLocalFrame_.rotation() * normalInContactFrame_;
+    }
+    if (!normalInLocalFrame.allFinite() || normalInLocalFrame.squaredNorm() < 1e-12) {
+      normalInLocalFrame = Eigen::Vector3d::UnitZ();
+    }
+    return normalInLocalFrame.normalized();
+  }
+
+  Eigen::Vector3d AssumedSurfaceContactConstraint::computeMeshNormalInContactFrame(
+      const pinocchio::SE3& contactPoseInLocalFrame) const {
+    const Eigen::Vector3d normalInLocalFrame =
+      computeMeshNormalInLocalFrame(contactPoseInLocalFrame.translation());
     Eigen::Vector3d normalInContactFrame =
       contactPoseInLocalFrame.rotation().transpose() * normalInLocalFrame;
     if (!normalInContactFrame.allFinite() || normalInContactFrame.squaredNorm() < 1e-12) {
@@ -258,9 +324,32 @@ namespace {
     }
 
     const auto contactCandidate = stateConverterPtr_->getContactCandidate(state, contactIndex_);
-    const Eigen::Vector3d normalInContactFrame =
-      computeMeshNormalInContactFrame(contactCandidate.localPoseInLocalFrame);
-    return computeWeightedGeometry(normalInContactFrame, contactCandidate.localPoseInLocalFrame);
+    pinocchio::SE3 contactPoseInLocalFrame = contactCandidate.localPoseInLocalFrame;
+    const Eigen::Vector3d meshNormalInLocalFrame =
+      computeMeshNormalInLocalFrame(contactPoseInLocalFrame.translation());
+    if (contactCandidate.alignContactFrameWithMeshNormal
+        && contactCandidate.meshVerticesInLocalFrame
+        && contactCandidate.meshNormalsInLocalFrame
+        && !contactCandidate.meshVerticesInLocalFrame->empty()
+        && !contactCandidate.meshNormalsInLocalFrame->empty()) {
+      contactPoseInLocalFrame.rotation() =
+        makeContactRotationFromNormal(contactPoseInLocalFrame.rotation(),
+                                      meshNormalInLocalFrame);
+    }
+    Eigen::Vector3d surfaceWeightNormalInContactFrame =
+      contactPoseInLocalFrame.rotation().transpose() * meshNormalInLocalFrame;
+    if (!surfaceWeightNormalInContactFrame.allFinite()
+        || surfaceWeightNormalInContactFrame.squaredNorm() < 1e-12) {
+      surfaceWeightNormalInContactFrame = surfaceNormalInContactFrame_;
+    }
+    surfaceWeightNormalInContactFrame.normalize();
+    Eigen::Vector3d normalInContactFrame = surfaceWeightNormalInContactFrame;
+    if (normalInContactFrame.dot(normalInContactFrame_) < 0.0) {
+      normalInContactFrame = -normalInContactFrame;
+    }
+    return computeWeightedGeometry(normalInContactFrame,
+                                   surfaceWeightNormalInContactFrame,
+                                   contactPoseInLocalFrame);
   }
 
   Eigen::Vector3d AssumedSurfaceContactConstraint::getGeometricCenterInContactPlane(const ocs2::vector_t& state) const {

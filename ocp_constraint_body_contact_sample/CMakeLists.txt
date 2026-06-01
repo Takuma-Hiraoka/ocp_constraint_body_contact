@@ -54,6 +54,17 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+add_executable(contact_search_visualizer src/contact_search_visualizer.cpp)
+
+ament_target_dependencies(contact_search_visualizer
+  ${dependencies}
+  )
+
+install(TARGETS
+  contact_search_visualizer
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY unitree_ros
   DESTINATION share/${PROJECT_NAME}
   )

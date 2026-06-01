@@ -70,7 +70,11 @@ namespace ocp_constraint_body_contact {
     void computeWeightedGeometry();
     SurfaceGeometry computeWeightedGeometry(const Eigen::Vector3d& normalInContactFrame,
                                             const pinocchio::SE3& contactPoseInLocalFrame) const;
+    SurfaceGeometry computeWeightedGeometry(const Eigen::Vector3d& normalInContactFrame,
+                                            const Eigen::Vector3d& surfaceWeightNormalInContactFrame,
+                                            const pinocchio::SE3& contactPoseInLocalFrame) const;
     pinocchio::SE3 getTargetPose(ocs2::scalar_t time) const;
+    Eigen::Vector3d computeMeshNormalInLocalFrame(const Eigen::Vector3d& contactPointInLocalFrame) const;
     Eigen::Vector3d computeMeshNormalInContactFrame(const pinocchio::SE3& contactPoseInLocalFrame) const;
 
     const ocp_solver::StateConverter<ocs2::scalar_t>* stateConverterPtr_;
