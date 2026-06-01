@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <Eigen/Eigenvalues>
+#include <assimp_eigen/assimp_eigen.h>
 #include <mujoco/mujoco.h>
 #include <mujoco_viewer/mujoco_viewer.h>
 #include <pinocchio/algorithm/frames.hpp>
@@ -113,7 +114,7 @@ std::vector<double> toMujocoQ(const ocs2::vector_t& state, int nq) {
 void addContactFix(ocp_solver::OCPInterface& interface, size_t contactIndex, const std::string& name) {
   ocp_constraint::PositionConstraint::Config config;
   config.Ax = ocs2::matrix_t::Zero(6, 6);
-  config.Ax.block(0, 0, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 100;
+  config.Ax.block(0, 0, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 1000;
   config.Ax.block(3, 3, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 1000;
   config.Av = ocs2::matrix_t::Identity(6, 6);
   config.Av.block(0, 0, 2, 2) = Eigen::MatrixXd::Identity(2, 2) * 50;
@@ -363,6 +364,10 @@ int main(int argc, char** argv) {
     candidate.parentJointName = "right_rubber_hand";
     candidate.localPose = pinocchio::SE3(Eigen::Matrix3d::Identity(), Eigen::Vector3d(0.035, -0.01, 0.0));
     candidate.searchContactPoint = true;
+    candidate.alignContactFrameWithMeshNormal = true;
+    const assimp_eigen::MeshData mesh = assimp_eigen::loadMesh(rhContactMeshFile);
+    candidate.meshVerticesInLocalFrame = mesh.vertices;
+    candidate.meshNormalsInLocalFrame = mesh.normals;
     contactCandidates.push_back(candidate);
   }
 
@@ -411,10 +416,11 @@ int main(int argc, char** argv) {
           *interface.getReferenceManagerPtr(), 2, interface.getStateConverter(), rhContactMeshFile));
   std::vector<AssumedSurfaceVisualization> assumedSurfaceVisualizations;
   {
-    ocs2::PieceWisePolynomialBarrierPenalty::Config footSurfaceContactConfig(1000.0, 0.01);
+    ocs2::PieceWisePolynomialBarrierPenalty::Config footSurfaceContactConfig(1e5, 0.01);
     ocs2::PieceWisePolynomialBarrierPenalty::Config handSurfaceContactConfig(1e6, 0.01);
     ocp_constraint_body_contact::AssumedSurfaceContactConstraint::Config assumedSurfaceConfig;
     assumedSurfaceConfig.ellipseSafetyMargin = 0.01;
+    assumedSurfaceConfig.ellipseScale = 1.15;
     assumedSurfaceConfig.frictionCoef = 10.0;
     const std::vector<std::string> contactMeshes = {
         robotDir + "/meshes/right_ankle_roll_link.STL",
@@ -423,8 +429,10 @@ int main(int argc, char** argv) {
     };
     assumedSurfaceVisualizations.reserve(contactMeshes.size());
     for (size_t i = 0; i < contactMeshes.size(); ++i) {
+      ocp_constraint_body_contact::AssumedSurfaceContactConstraint::Config contactSurfaceConfig = assumedSurfaceConfig;
+      contactSurfaceConfig.ellipseScale = i == 2 ? 1.7 : 1.4;
       auto constraint = std::make_unique<ocp_constraint_body_contact::AssumedSurfaceContactConstraint>(
-          *interface.getReferenceManagerPtr(), i, interface.getStateConverter(), contactMeshes[i], assumedSurfaceConfig);
+          *interface.getReferenceManagerPtr(), i, interface.getStateConverter(), contactMeshes[i], contactSurfaceConfig);
       assumedSurfaceVisualizations.push_back({i, constraint.get()});
       interface.getOptimalControlProblem().softConstraintPtr->add(
           "assumedSurfaceContact_" + contactCandidates[i].frameName,

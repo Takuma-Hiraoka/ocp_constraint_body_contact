@@ -101,10 +101,14 @@ namespace {
 
     ocs2::scalar_t weightSum = 0.0;
     geometricCenter_.setZero();
+    const double proximityLengthScale = 0.05;
+    const double invTwoProximitySigma2 = 0.5 / (proximityLengthScale * proximityLengthScale);
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
       const ocs2::scalar_t signedDistance = surfaceNormalInContactFrame_.dot(vertexInContactFrame);
-      const ocs2::scalar_t weight = std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance));
+      const ocs2::scalar_t weight =
+        std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance))
+        * std::exp(-vertexInContactFrame.squaredNorm() * invTwoProximitySigma2);
       weightSum += weight;
       geometricCenter_.noalias() += weight * vertexInContactFrame;
     }
@@ -117,7 +121,9 @@ namespace {
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
       const ocs2::scalar_t signedDistance = surfaceNormalInContactFrame_.dot(vertexInContactFrame);
-      const ocs2::scalar_t weight = std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance));
+      const ocs2::scalar_t weight =
+        std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance))
+        * std::exp(-vertexInContactFrame.squaredNorm() * invTwoProximitySigma2);
       const Eigen::Vector3d delta = vertexInContactFrame - geometricCenter_;
       covariance_.noalias() += weight * delta * delta.transpose();
     }
@@ -151,10 +157,14 @@ namespace {
 
     ocs2::scalar_t weightSum = 0.0;
     Eigen::Vector3d geometricCenter = Eigen::Vector3d::Zero();
+    const double proximityLengthScale = 0.05;
+    const double invTwoProximitySigma2 = 0.5 / (proximityLengthScale * proximityLengthScale);
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
       const ocs2::scalar_t signedDistance = geometry.normalInContactFrame.dot(vertexInContactFrame);
-      const ocs2::scalar_t weight = std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance));
+      const ocs2::scalar_t weight =
+        std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance))
+        * std::exp(-vertexInContactFrame.squaredNorm() * invTwoProximitySigma2);
       weightSum += weight;
       geometricCenter.noalias() += weight * vertexInContactFrame;
     }
@@ -167,7 +177,9 @@ namespace {
     for (const Eigen::Vector3d& vertex : vertices_) {
       const Eigen::Vector3d vertexInContactFrame = localFramePoseInContact.act(vertex);
       const ocs2::scalar_t signedDistance = geometry.normalInContactFrame.dot(vertexInContactFrame);
-      const ocs2::scalar_t weight = std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance));
+      const ocs2::scalar_t weight =
+        std::exp(config_.normalWeightScale * (signedDistance - maxSignedDistance))
+        * std::exp(-vertexInContactFrame.squaredNorm() * invTwoProximitySigma2);
       const Eigen::Vector3d delta = vertexInContactFrame - geometricCenter;
       covariance.noalias() += weight * delta * delta.transpose();
     }
@@ -203,18 +215,26 @@ namespace {
     }
 
     const Eigen::Vector3d contactPointInLocalFrame = contactPoseInLocalFrame.translation();
-    size_t nearestIndex = 0;
-    double nearestDistance = std::numeric_limits<double>::infinity();
+    Eigen::Vector3d weightedNormalInLocalFrame = Eigen::Vector3d::Zero();
+    double weightSum = 0.0;
+    const double lengthScale = 0.02;
+    const double invTwoSigma2 = 0.5 / (lengthScale * lengthScale);
     for (size_t i = 0; i < vertices_.size(); ++i) {
-      const double distance = (vertices_[i] - contactPointInLocalFrame).squaredNorm();
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestIndex = i;
+      const double squaredDistance = (vertices_[i] - contactPointInLocalFrame).squaredNorm();
+      const double weight = std::exp(-squaredDistance * invTwoSigma2);
+      const Eigen::Vector3d normal = normals_[std::min(i, normals_.size() - 1)];
+      if (normal.allFinite() && normal.squaredNorm() > 1e-12) {
+        weightedNormalInLocalFrame.noalias() += weight * normal.normalized();
+        weightSum += weight;
       }
     }
 
+    Eigen::Vector3d normalInLocalFrame = Eigen::Vector3d::Zero();
+    if (weightSum > 0.0) {
+      normalInLocalFrame = weightedNormalInLocalFrame / weightSum;
+    }
     Eigen::Vector3d normalInContactFrame =
-      contactPoseInLocalFrame.rotation().transpose() * normals_[nearestIndex];
+      contactPoseInLocalFrame.rotation().transpose() * normalInLocalFrame;
     if (!normalInContactFrame.allFinite() || normalInContactFrame.squaredNorm() < 1e-12) {
       return normalInContactFrame_;
     }
