@@ -17,6 +17,7 @@
 #include <pinocchio/fwd.hpp>
 
 #include <ocs2_core/constraint/StateInputConstraint.h>
+#include <ocs2_core/penalties/penalties/QuadraticPenalty.h>
 #include <ocs2_core/soft_constraint/StateInputSoftConstraint.h>
 #include <ocp_constraint/contact_fix_constraint.h>
 #include <ocp_constraint/joint_limit_constraint.h>
@@ -74,15 +75,23 @@ std::vector<double> toViewerQ(const ocs2::vector_t& state) {
 }
 
 void addFootConstraint(ocp_solver::OCPInterface& interface, size_t contactIndex) {
-  ocp_constraint::PositionConstraint::Config config;
-  config.Ax = ocs2::matrix_t::Zero(6, 6);
-  config.Ax.leftCols(6).setIdentity();
-
   const std::string frameName = interface.getStateConverter().getContactCandidate(contactIndex).frameName;
   auto frameDynamics = std::make_unique<ocp_solver::PinocchioFrameDynamics>(interface.getStateConverter(), contactIndex);
+
+  ocp_constraint::PositionConstraint::Config hardConfig;
+  hardConfig.Aa.setIdentity(6, 6);
   interface.getOptimalControlProblem().equalityConstraintPtr->add(
-      frameName + "_pose",
-      std::make_unique<ocp_constraint::ContactFixConstraint>(*interface.getReferenceManagerPtr(), *frameDynamics, 6, config));
+      frameName + "_acceleration",
+      std::make_unique<ocp_constraint::ContactFixConstraint>(*interface.getReferenceManagerPtr(), *frameDynamics, 6, hardConfig));
+
+  ocp_constraint::PositionConstraint::Config softConfig;
+  softConfig.Ax = ocs2::matrix_t::Zero(3, 6);
+  softConfig.Ax.block(0, 3, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 100;
+  interface.getOptimalControlProblem().softConstraintPtr->add(
+      frameName + "_orientation",
+      std::make_unique<ocs2::StateInputSoftConstraint>(
+          std::make_unique<ocp_constraint::ContactFixConstraint>(*interface.getReferenceManagerPtr(), *frameDynamics, 3, softConfig),
+          std::make_unique<ocs2::QuadraticPenalty>(1.0)));
 }
 
 void appendSphere(mujoco_viewer::Viewer& viewer,

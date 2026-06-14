@@ -112,22 +112,23 @@ std::vector<double> toMujocoQ(const ocs2::vector_t& state, int nq) {
 }
 
 void addContactFix(ocp_solver::OCPInterface& interface, size_t contactIndex, const std::string& name) {
-  ocp_constraint::PositionConstraint::Config config;
-  config.Ax = ocs2::matrix_t::Zero(6, 6);
-  config.Ax.block(0, 0, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 1000;
-  config.Ax.block(3, 3, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 1000;
-  config.Av = ocs2::matrix_t::Identity(6, 6);
-  config.Av.block(0, 0, 2, 2) = Eigen::MatrixXd::Identity(2, 2) * 50;
-  config.Av(2, 2) = 50;
-  config.Av.block(3, 3, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 20;
-  config.Aa = ocs2::matrix_t::Identity(6, 6);
-  config.Aa.block(0, 0, 2, 2) = Eigen::MatrixXd::Identity(2, 2) * 1;
-  config.Aa(2, 2) = 1;
-  config.Aa.block(3, 3, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 1;
   auto frameDynamics = std::make_unique<ocp_solver::PinocchioFrameDynamics>(interface.getStateConverter(), contactIndex);
+
+  ocp_constraint::PositionConstraint::Config hardConfig;
+  hardConfig.Aa = ocs2::matrix_t::Identity(6, 6);
   interface.getOptimalControlProblem().equalityConstraintPtr->add(
       name, std::make_unique<ocp_constraint::ContactFixConstraint>(
-                *interface.getReferenceManagerPtr(), *frameDynamics, 6, config));
+                *interface.getReferenceManagerPtr(), *frameDynamics, 6, hardConfig));
+
+  ocp_constraint::PositionConstraint::Config softConfig;
+  softConfig.Ax = ocs2::matrix_t::Zero(3, 6);
+  softConfig.Ax.block(0, 3, 3, 3) = Eigen::MatrixXd::Identity(3, 3) * 100;
+  interface.getOptimalControlProblem().softConstraintPtr->add(
+      name + "_orientation",
+      std::make_unique<ocs2::StateInputSoftConstraint>(
+          std::make_unique<ocp_constraint::ContactFixConstraint>(
+              *interface.getReferenceManagerPtr(), *frameDynamics, 3, softConfig),
+          std::make_unique<ocs2::QuadraticPenalty>(1.0)));
 }
 
 std::array<mjtNum, 3> toMujocoPosition(const Eigen::Vector3d& position) {
