@@ -294,7 +294,8 @@ int main() {
     interface.getOptimalControlProblem().equalityConstraintPtr->add(
         "right_wrist_position",
         std::make_unique<ocp_constraint::PositionConstraint>(*frameDynamics, 3, config,
-                                                             pinocchio::SE3(Eigen::Matrix3d::Identity(), targetPosition)));
+                                                             ocp_solver::TargetSE3Trajectory(
+                                                                 pinocchio::SE3(Eigen::Matrix3d::Identity(), targetPosition))));
   }
 
   addFootConstraint(interface, 0);
@@ -376,8 +377,8 @@ int main() {
   const pinocchio::SE3 rfPose = ocp_solver::getContactCandidatePlacement(pinocchioInterface, interface.getStateConverter().getContactCandidate(0));
   const pinocchio::SE3 lfPose = ocp_solver::getContactCandidatePlacement(pinocchioInterface, interface.getStateConverter().getContactCandidate(1));
   interface.getReferenceManagerPtr()->setContactSchedule(
-      ocp_solver::ContactSchedule({}, {{{0, rfPose},
-                                        {1, lfPose}}}));
+      ocp_solver::ContactSchedule({}, {{{0, ocp_solver::TargetSE3Trajectory(rfPose)},
+                                        {1, ocp_solver::TargetSE3Trajectory(lfPose)}}}));
   interface.getReferenceManagerPtr()->preSolverRun(0.0, 0.0, initialState);
 
   auto optimizer = interface.createPoseOptimizer();

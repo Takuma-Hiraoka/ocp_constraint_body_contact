@@ -201,12 +201,13 @@ void updatePinocchioKinematics(ocs2::PinocchioInterface& pinocchioInterface, con
   pinocchio::updateFramePlacements(pinocchioInterface.getModel(), pinocchioInterface.getData());
 }
 
-bool findContactTarget(const std::vector<std::pair<ocp_solver::ContactCandidateIndex, pinocchio::SE3>>& contacts,
+bool findContactTarget(const std::vector<ocp_solver::ContactTargetTrajectory>& contacts,
+                       ocs2::scalar_t time,
                        size_t contactIndex,
                        pinocchio::SE3& targetPose) {
   for (const auto& contact : contacts) {
     if (contact.first == contactIndex) {
-      targetPose = contact.second;
+      targetPose = contact.second.getTargetPose(time);
       return true;
     }
   }
@@ -217,8 +218,9 @@ void appendContactTrajectoryVisualization(
     mujoco_viewer::Viewer& viewer,
     ocs2::PinocchioInterface& pinocchioInterface,
     const ocp_solver::StateConverter<ocs2::scalar_t>& stateConverter,
+    ocs2::scalar_t time,
     const ocs2::vector_t& state,
-    const std::vector<std::pair<ocp_solver::ContactCandidateIndex, pinocchio::SE3>>& targetContacts,
+    const std::vector<ocp_solver::ContactTargetTrajectory>& targetContacts,
     const std::vector<ContactTrajectoryVisualization>& visualizations) {
   const std::array<float, 4> parentColor = {0.75f, 0.75f, 0.75f, 1.0f};
   for (const ContactTrajectoryVisualization& visualization : visualizations) {
@@ -235,7 +237,7 @@ void appendContactTrajectoryVisualization(
     }
 
     pinocchio::SE3 targetPose = pinocchio::SE3::Identity();
-    if (findContactTarget(targetContacts, visualization.contactIndex, targetPose)) {
+    if (findContactTarget(targetContacts, time, visualization.contactIndex, targetPose)) {
       mujoco_viewer::appendSphere(viewer, toMujocoPosition(targetPose.translation()), 0.018, visualization.targetColor);
       mujoco_viewer::appendLine(viewer, toMujocoPosition(currentPose.translation()), toMujocoPosition(targetPose.translation()), 3.0, visualization.errorColor);
     }
@@ -317,7 +319,8 @@ void visualizeOptimizationTrajectory(
     updatePinocchioKinematics(pinocchioInterface, state);
     setViewerQ(viewer, state, pinocchioInterface.getModel().nq);
     viewer.updateScene();
-    appendContactTrajectoryVisualization(viewer, pinocchioInterface, stateConverter, state,
+    appendContactTrajectoryVisualization(viewer, pinocchioInterface, stateConverter,
+                                         timeTrajectory[trajectoryIndex], state,
                                          referenceManager.getContacts(timeTrajectory[trajectoryIndex]),
                                          contactVisualizations);
     appendAssumedSurfaceVisualization(viewer, pinocchioInterface, stateConverter,
@@ -492,8 +495,11 @@ int main(int argc, char** argv) {
   const pinocchio::SE3 rhWallPose(rhWallRotation, rhInitialPose.translation() + Eigen::Vector3d(0.1, -0.1, 0.1));
 
   interface.getReferenceManagerPtr()->setContactSchedule(
-      ocp_solver::ContactSchedule({0.8}, {{{0, rfPose}, {1, lfPose}},
-                                   {{0, rfPose}, {1, lfPose}, {2, rhWallPose}}}));
+      ocp_solver::ContactSchedule({0.8}, {{ocp_solver::makeContactTarget(0, 0.8, rfPose),
+                                            ocp_solver::makeContactTarget(1, 0.8, lfPose)},
+                                           {ocp_solver::makeContactTarget(0, 0.8, rfPose),
+                                            ocp_solver::makeContactTarget(1, 0.8, lfPose),
+                                            ocp_solver::makeContactTarget(2, 0.8, rhWallPose)}}));
 
   {
     auto frameDynamics = std::make_unique<ocp_solver::PinocchioFrameDynamics>(interface.getStateConverter(), 2);

@@ -256,7 +256,7 @@ namespace {
   pinocchio::SE3 AssumedSurfaceContactConstraint::getTargetPose(ocs2::scalar_t time) const {
     for (const auto& contact : referenceManagerPtr_->getContacts(time)) {
       if (contact.first == stateConverterPtr_->getContactCandidateIds()[contactIndex_]) {
-        return contact.second;
+        return contact.second.getTargetPose(time);
       }
     }
     return pinocchio::SE3::Identity();

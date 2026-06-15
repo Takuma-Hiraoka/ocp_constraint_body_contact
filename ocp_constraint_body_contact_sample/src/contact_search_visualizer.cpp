@@ -364,7 +364,8 @@ int main(int argc, char** argv) {
         "left_hip_yaw_contact_wall_position",
         std::make_unique<ocs2::StateInputSoftConstraint>(
             std::make_unique<ocp_constraint::PositionConstraint>(
-                *frameDynamics, 3, config, pinocchio::SE3(Eigen::Matrix3d::Identity(), targetPosition)),
+                *frameDynamics, 3, config,
+                ocp_solver::TargetSE3Trajectory(pinocchio::SE3(Eigen::Matrix3d::Identity(), targetPosition))),
             std::make_unique<ocs2::QuadraticPenalty>(1e5)));
   }
 
@@ -407,7 +408,7 @@ int main(int argc, char** argv) {
   const ocs2::vector_array_t inputTrajectory{initialInput};
   interface.getReferenceManagerPtr()->setTargetTrajectories({timeTrajectory, stateTrajectory, inputTrajectory});
   interface.getReferenceManagerPtr()->setContactSchedule(
-      ocp_solver::ContactSchedule({}, {{{0, initialContactPose}}}));
+      ocp_solver::ContactSchedule({}, {{{0, ocp_solver::TargetSE3Trajectory(initialContactPose)}}}));
   interface.getReferenceManagerPtr()->preSolverRun(0.0, 0.0, initialState);
 
   auto optimizer = interface.createPoseOptimizer();
