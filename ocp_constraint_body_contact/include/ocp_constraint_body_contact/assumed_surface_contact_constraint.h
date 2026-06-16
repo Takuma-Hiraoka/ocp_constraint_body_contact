@@ -30,6 +30,7 @@ namespace ocp_constraint_body_contact {
       ocs2::scalar_t frictionCoef = 0.5;
       ocs2::scalar_t ellipseScale = 1.0;
       ocs2::scalar_t ellipseSafetyMargin = 0.0;
+      ocs2::scalar_t meshVoxelGridSize = 0.01;
     };
     AssumedSurfaceContactConstraint(const ocp_solver::SwitchedModelReferenceManager& referenceManager,
                                     size_t contactIndex,

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
@@ -17,6 +18,84 @@ namespace {
 
   Eigen::Matrix3d tangentProjection(const Eigen::Vector3d& normal) {
     return Eigen::Matrix3d::Identity() - normal * normal.transpose();
+  }
+
+  struct VoxelKey {
+    int x = 0;
+    int y = 0;
+    int z = 0;
+
+    bool operator==(const VoxelKey& rhs) const {
+      return x == rhs.x && y == rhs.y && z == rhs.z;
+    }
+    bool operator<(const VoxelKey& rhs) const {
+      if (x != rhs.x) {
+        return x < rhs.x;
+      }
+      if (y != rhs.y) {
+        return y < rhs.y;
+      }
+      return z < rhs.z;
+    }
+  };
+
+  struct VoxelAccumulator {
+    Eigen::Vector3d vertexSum = Eigen::Vector3d::Zero();
+    Eigen::Vector3d normalSum = Eigen::Vector3d::Zero();
+    size_t count = 0;
+  };
+
+  VoxelKey makeVoxelKey(const Eigen::Vector3d& vertex, ocs2::scalar_t voxelSize) {
+    return {
+      static_cast<int>(std::floor(vertex.x() / voxelSize)),
+      static_cast<int>(std::floor(vertex.y() / voxelSize)),
+      static_cast<int>(std::floor(vertex.z() / voxelSize)),
+    };
+  }
+
+  void voxelGridAverageMesh(const std::vector<Eigen::Vector3d>& inputVertices,
+                            const std::vector<Eigen::Vector3d>& inputNormals,
+                            ocs2::scalar_t voxelSize,
+                            std::vector<Eigen::Vector3d>& outputVertices,
+                            std::vector<Eigen::Vector3d>& outputNormals) {
+    outputVertices.clear();
+    outputNormals.clear();
+    if (voxelSize <= 0.0 || inputVertices.empty()) {
+      outputVertices = inputVertices;
+      outputNormals = inputNormals;
+      return;
+    }
+
+    std::map<VoxelKey, VoxelAccumulator> voxels;
+    for (size_t i = 0; i < inputVertices.size(); ++i) {
+      const Eigen::Vector3d& vertex = inputVertices[i];
+      if (!vertex.allFinite()) {
+        continue;
+      }
+      VoxelAccumulator& accumulator = voxels[makeVoxelKey(vertex, voxelSize)];
+      accumulator.vertexSum += vertex;
+      if (i < inputNormals.size() && inputNormals[i].allFinite()) {
+        accumulator.normalSum += inputNormals[i];
+      }
+      ++accumulator.count;
+    }
+
+    outputVertices.reserve(voxels.size());
+    outputNormals.reserve(voxels.size());
+    for (const auto& voxel : voxels) {
+      const VoxelAccumulator& accumulator = voxel.second;
+      if (accumulator.count == 0) {
+        continue;
+      }
+      outputVertices.push_back(accumulator.vertexSum / static_cast<double>(accumulator.count));
+      Eigen::Vector3d normal = accumulator.normalSum;
+      if (!normal.allFinite() || normal.squaredNorm() < 1e-12) {
+        normal = Eigen::Vector3d::UnitZ();
+      } else {
+        normal.normalize();
+      }
+      outputNormals.push_back(normal);
+    }
   }
 
   Eigen::Vector3d normalAlignedWithForce(const Eigen::Vector3d& normal,
@@ -79,20 +158,13 @@ namespace {
       defaultContactPoseInParent_(stateConverterPtr_->getContactCandidate(contactIndex_).localPose),
       defaultContactPoseInLocalFrame_(stateConverterPtr_->getContactCandidate(contactIndex_).localPoseInLocalFrame) {
     const assimp_eigen::MeshData mesh = assimp_eigen::loadMesh(meshFile);
-    vertices_.reserve(mesh.vertices.size());
-    for (const Eigen::Vector3d& vertex : mesh.vertices) {
-      vertices_.push_back(vertex);
-    }
-    if (vertices_.empty()) {
-      throw std::runtime_error("AssumedSurfaceContactConstraint: mesh has no vertices: " + meshFile);
-    }
-    normals_ = mesh.normals;
     const Eigen::Vector3d fallbackNormalInLocalFrame =
       defaultContactPoseInLocalFrame_.rotation() * config_.surfaceNormalInContactFrame;
-    if (normals_.size() < vertices_.size()) {
-      normals_.resize(vertices_.size(), fallbackNormalInLocalFrame);
+    std::vector<Eigen::Vector3d> meshNormals = mesh.normals;
+    if (meshNormals.size() < mesh.vertices.size()) {
+      meshNormals.resize(mesh.vertices.size(), fallbackNormalInLocalFrame);
     }
-    for (Eigen::Vector3d& normal : normals_) {
+    for (Eigen::Vector3d& normal : meshNormals) {
       if (!normal.allFinite() || normal.squaredNorm() < 1e-12) {
         normal = fallbackNormalInLocalFrame;
       }
@@ -100,6 +172,10 @@ namespace {
         normal = Eigen::Vector3d::UnitZ();
       }
       normal.normalize();
+    }
+    voxelGridAverageMesh(mesh.vertices, meshNormals, config_.meshVoxelGridSize, vertices_, normals_);
+    if (vertices_.empty()) {
+      throw std::runtime_error("AssumedSurfaceContactConstraint: mesh has no vertices: " + meshFile);
     }
     computeWeightedGeometry();
   }
