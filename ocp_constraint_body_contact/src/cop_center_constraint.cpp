@@ -1,5 +1,6 @@
 #include "ocp_constraint_body_contact/cop_center_constraint.h"
 
+#include <ocp_solver/common/scope_profiler.h>
 #include <ocp_solver/solver/dynamics_helper_functions.h>
 #include <ocp_solver/solver/ocp_pre_computation.h>
 #include <ocs2_robotic_tools/common/SkewSymmetricMatrix.h>
@@ -45,6 +46,7 @@ ocs2::vector_t CopCenterConstraint::getValue(ocs2::scalar_t time,
                                              const ocs2::vector_t& state,
                                              const ocs2::vector_t& input,
                                              const ocs2::PreComputation& preComp) const {
+  OCP_SOLVER_PROFILE_SCOPE("CopCenterConstraint::getValue");
   const ocp_solver::OCPPreComputation& ocpPreComp =
       static_cast<const ocp_solver::OCPPreComputation&>(preComp);
   ocs2::PinocchioInterface& pinocchioInterface = ocpPreComp.getPinocchioInterface();
@@ -66,6 +68,7 @@ ocs2::VectorFunctionLinearApproximation CopCenterConstraint::getLinearApproximat
     const ocs2::vector_t& state,
     const ocs2::vector_t& input,
     const ocs2::PreComputation& preComp) const {
+  OCP_SOLVER_PROFILE_SCOPE("CopCenterConstraint::getLinearApproximation");
   const ocp_solver::OCPPreComputation& ocpPreComp =
       static_cast<const ocp_solver::OCPPreComputation&>(preComp);
   ocs2::PinocchioInterface& pinocchioInterface = ocpPreComp.getPinocchioInterface();

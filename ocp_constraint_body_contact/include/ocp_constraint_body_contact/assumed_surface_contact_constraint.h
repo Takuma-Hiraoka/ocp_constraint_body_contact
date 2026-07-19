@@ -24,13 +24,16 @@ namespace ocp_constraint_body_contact {
       Eigen::Vector3d contactNormalInContactFrame = Eigen::Vector3d::UnitZ();
       Eigen::Vector3d surfaceNormalInContactFrame = -Eigen::Vector3d::UnitZ();
       ocs2::scalar_t normalWeightScale = 50.0;
+      ocs2::scalar_t proximityLengthScale = 0.05;
       ocs2::scalar_t covarianceRegularization = 1e-6;
       ocs2::scalar_t normalForceRegularization = 1.0;
       ocs2::scalar_t minNormalForce = 1.0;
       ocs2::scalar_t frictionCoef = 0.5;
+      ocs2::scalar_t rotFrictionCoef = 0.005;
       ocs2::scalar_t ellipseScale = 1.0;
       ocs2::scalar_t ellipseSafetyMargin = 0.0;
       ocs2::scalar_t meshVoxelGridSize = 0.01;
+      pinocchio::SE3 meshPoseInLocalFrame = pinocchio::SE3::Identity();
     };
     AssumedSurfaceContactConstraint(const ocp_solver::SwitchedModelReferenceManager& referenceManager,
                                     size_t contactIndex,
@@ -53,6 +56,10 @@ namespace ocp_constraint_body_contact {
                                                                    const ocs2::PreComputation& preComp) const override;
     const Eigen::Vector3d& getNormalInContactFrame() const { return normalInContactFrame_; }
     const Eigen::Vector3d& getGeometricCenterInContactPlane() const { return geometricCenterInContactPlane_; }
+    size_t getNumSurfaceVertices() const { return vertices_.size(); }
+    double getInitialWeightedGeometryComputationTimeMs() const {
+      return initialWeightedGeometryComputationTimeMs_;
+    }
     Eigen::Vector3d getGeometricCenterInContactPlane(const ocs2::vector_t& state) const;
     const Eigen::Matrix3d& getEllipseMetricInContactFrame() const { return ellipseMetric_; }
     SurfaceGeometry getSurfaceGeometry(ocs2::scalar_t time,
@@ -81,7 +88,7 @@ namespace ocp_constraint_body_contact {
     const ocp_solver::StateConverter<ocs2::scalar_t>* stateConverterPtr_;
     const ocp_solver::SwitchedModelReferenceManager* referenceManagerPtr_;
     const size_t contactIndex_;
-    static const int n_constraints = 6;
+    static const int n_constraints = 8;
     Config config_;
     pinocchio::SE3 defaultContactPoseInParent_ = pinocchio::SE3::Identity();
     pinocchio::SE3 defaultContactPoseInLocalFrame_ = pinocchio::SE3::Identity();
@@ -93,6 +100,7 @@ namespace ocp_constraint_body_contact {
     Eigen::Vector3d geometricCenterInContactPlane_ = Eigen::Vector3d::Zero();
     Eigen::Matrix3d covariance_ = Eigen::Matrix3d::Identity();
     Eigen::Matrix3d ellipseMetric_ = Eigen::Matrix3d::Identity();
+    double initialWeightedGeometryComputationTimeMs_ = 0.0;
   };
 
 }
